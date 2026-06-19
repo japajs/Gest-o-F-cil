@@ -16,6 +16,7 @@ import Audit from './pages/Audit';
 import Categories from './pages/Categories';
 import Users from './pages/Users';
 import Settings from './pages/Settings';
+import Segments from './pages/Segments';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -52,6 +53,7 @@ function AppRoutes() {
         <Route path="/categories" element={<RequireAdmin><Categories /></RequireAdmin>} />
         <Route path="/users" element={<RequireAdmin><Users /></RequireAdmin>} />
         <Route path="/audit" element={<RequireAdmin><Audit /></RequireAdmin>} />
+        <Route path="/segments" element={<RequireAdmin><Segments /></RequireAdmin>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

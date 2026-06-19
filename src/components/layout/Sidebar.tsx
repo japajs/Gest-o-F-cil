@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Building2, TrendingUp, TrendingDown,
   CreditCard, Wallet, ArrowLeftRight, FileText, ClipboardList,
-  Settings, LogOut, ChevronLeft, ChevronRight, Tag, Users,
+  Settings, LogOut, ChevronLeft, ChevronRight, Tag, Users, Layers,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -50,6 +50,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: 'SISTEMA',
     items: [
       { to: '/categories', icon: Tag, label: 'Categorias', adminOnly: true },
+      { to: '/segments', icon: Layers, label: 'Segmentos', adminOnly: true },
       { to: '/users', icon: Users, label: 'Usuários', adminOnly: true },
       { to: '/audit', icon: ClipboardList, label: 'Auditoria', adminOnly: true },
       { to: '/settings', icon: Settings, label: 'Configurações' },

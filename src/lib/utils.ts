@@ -56,10 +56,3 @@ export function getMonthRange(year: number, month: number): { start: string; end
     end: end.toISOString().split('T')[0]!,
   };
 }
-
-export function segmentOptions(): string[] {
-  return [
-    'Barbearia', 'Clínica', 'Loja', 'Manicure', 'Pedicure',
-    'Prestador de serviço', 'Restaurante', 'Salão', 'Outro',
-  ];
-}

@@ -3,7 +3,6 @@ import { Plus, Pencil, Trash2, Building2 } from 'lucide-react';
 import { useForm } from 'react-hook-form';
 import { supabase } from '../lib/supabase';
 import { Company } from '../types';
-import { segmentOptions } from '../lib/utils';
 import { Modal } from '../components/ui/Modal';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
@@ -16,6 +15,7 @@ type FormData = Omit<Company, 'id' | 'created_at' | 'updated_at' | 'active'>;
 export default function Companies() {
   const { refresh } = useCompany();
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [segments, setSegments] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Company | null>(null);
@@ -25,13 +25,18 @@ export default function Companies() {
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<FormData>();
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); loadSegments(); }, []);
 
   async function load() {
     setLoading(true);
     const { data } = await supabase.from('companies').select('*').order('name');
     setCompanies(data ?? []);
     setLoading(false);
+  }
+
+  async function loadSegments() {
+    const { data } = await supabase.from('segments').select('name').order('name');
+    setSegments((data ?? []).map(s => s.name));
   }
 
   function openNew() {
@@ -165,7 +170,7 @@ export default function Companies() {
               <label className="label">Segmento</label>
               <select {...register('segment')} className="input">
                 <option value="">Selecione...</option>
-                {segmentOptions().map(s => <option key={s} value={s}>{s}</option>)}
+                {segments.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
           </div>
