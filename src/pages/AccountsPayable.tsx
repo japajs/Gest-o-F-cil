@@ -8,7 +8,9 @@ import { Modal } from '../components/ui/Modal';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Spinner } from '../components/ui/Spinner';
+import { CurrencyInput, parseCurrency, amountValidation } from '../components/ui/CurrencyInput';
 import { logAudit } from '../lib/audit';
+import { syncAPPayment } from '../lib/financialSync';
 import { useCompany } from '../contexts/CompanyContext';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -33,7 +35,7 @@ export default function AccountsPayable() {
   const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState<PaymentStatus | 'all'>('all');
 
-  const { register, handleSubmit, reset, watch } = useForm<FormData>();
+  const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<FormData>();
   const statusVal = watch('status');
 
   useEffect(() => { if (selectedCompany) load(); }, [selectedCompany]);
@@ -60,29 +62,80 @@ export default function AccountsPayable() {
   }
 
   async function markPaid(r: AccountPayable) {
-    await supabase.from('accounts_payable').update({ status: 'paid', paid_date: new Date().toISOString().split('T')[0] }).eq('id', r.id);
-    await logAudit({ action: `Pagou: ${r.supplier_name} - ${formatCurrency(r.amount)}`, tableName: 'accounts_payable', recordId: r.id, companyId: selectedCompany!.id });
+    const paidDate = new Date().toISOString().split('T')[0]!;
+    await supabase.from('accounts_payable')
+      .update({ status: 'paid', paid_date: paidDate })
+      .eq('id', r.id);
+
+    // C-02: sincroniza com fluxo de caixa
+    await syncAPPayment({ ...r, status: 'paid', paid_date: paidDate }, selectedCompany!.id);
+
+    await logAudit({
+      action: `Pagou conta: ${r.supplier_name} – ${formatCurrency(r.amount)}`,
+      tableName: 'accounts_payable',
+      recordId: r.id,
+      companyId: selectedCompany!.id,
+      details: { amount: r.amount, paid_date: paidDate },
+    });
     load();
   }
 
   async function onSubmit(data: FormData) {
     setSaving(true);
     const payload = {
-      company_id: selectedCompany!.id,
+      company_id:    selectedCompany!.id,
       supplier_name: data.supplier_name,
-      description: data.description || null,
-      amount: parseFloat(data.amount.replace(',', '.')),
-      due_date: data.due_date,
-      status: data.status,
-      paid_date: data.paid_date || null,
-      notes: data.notes || null,
+      description:   data.description || null,
+      amount:        parseCurrency(data.amount),
+      due_date:      data.due_date,
+      status:        data.status,
+      paid_date:     data.paid_date || null,
+      notes:         data.notes || null,
     };
+
     if (editing) {
+      const previousStatus = editing.status;
       await supabase.from('accounts_payable').update(payload).eq('id', editing.id);
+
+      // C-02: sincroniza se status mudou ou se era pago e pode ter mudado valor
+      if (data.status === 'paid' || previousStatus === 'paid') {
+        await syncAPPayment(
+          { id: editing.id, ...payload, status: data.status as PaymentStatus },
+          selectedCompany!.id,
+        );
+      }
+
+      await logAudit({
+        action: `Editou conta a pagar: ${data.supplier_name}`,
+        tableName: 'accounts_payable',
+        recordId: editing.id,
+        companyId: selectedCompany!.id,
+        details: {
+          before: { amount: editing.amount, status: editing.status },
+          after:  { amount: payload.amount, status: data.status },
+        },
+      });
     } else {
-      await supabase.from('accounts_payable').insert(payload);
+      const { data: created } = await supabase
+        .from('accounts_payable').insert(payload).select().single();
+
+      // C-02: se criada já como paga, gera despesa imediatamente
+      if (created && data.status === 'paid') {
+        await syncAPPayment(
+          { id: created.id, ...payload, status: 'paid' },
+          selectedCompany!.id,
+        );
+      }
+
+      await logAudit({
+        action: `Criou conta a pagar: ${data.supplier_name}`,
+        tableName: 'accounts_payable',
+        recordId: created?.id,
+        companyId: selectedCompany!.id,
+        details: { amount: payload.amount, status: data.status },
+      });
     }
-    await logAudit({ action: `${editing ? 'Editou' : 'Criou'} conta a pagar: ${data.supplier_name}`, tableName: 'accounts_payable', companyId: selectedCompany!.id });
+
     setSaving(false);
     setModalOpen(false);
     load();
@@ -90,7 +143,16 @@ export default function AccountsPayable() {
 
   async function confirmDelete() {
     if (!deleteTarget) return;
+    // Remove despesa vinculada antes de excluir (cascade é SET NULL, não CASCADE)
+    await supabase.from('expenses').delete().eq('ap_id', deleteTarget.id);
     await supabase.from('accounts_payable').delete().eq('id', deleteTarget.id);
+    await logAudit({
+      action: `Excluiu conta a pagar: ${deleteTarget.supplier_name} – ${formatCurrency(deleteTarget.amount)}`,
+      tableName: 'accounts_payable',
+      recordId: deleteTarget.id,
+      companyId: selectedCompany!.id,
+      details: { amount: deleteTarget.amount, status: deleteTarget.status },
+    });
     setDeleteTarget(null);
     load();
   }
@@ -171,19 +233,22 @@ export default function AccountsPayable() {
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
               <label className="label">Fornecedor *</label>
-              <input {...register('supplier_name', { required: true })} className="input" placeholder="Nome do fornecedor" />
+              <input {...register('supplier_name', { required: 'Campo obrigatório', maxLength: { value: 200, message: 'Máximo 200 caracteres' } })} className="input" placeholder="Nome do fornecedor" />
+              {errors.supplier_name && <p className="text-xs text-red-500 mt-1">{errors.supplier_name.message}</p>}
             </div>
             <div className="col-span-2">
               <label className="label">Descrição</label>
-              <input {...register('description')} className="input" placeholder="Ex: Conta de energia" />
+              <input {...register('description', { maxLength: { value: 500, message: 'Máximo 500 caracteres' } })} className="input" placeholder="Ex: Conta de energia" />
             </div>
             <div>
               <label className="label">Valor (R$) *</label>
-              <input {...register('amount', { required: true })} className="input" placeholder="0,00" />
+              <CurrencyInput {...register('amount', amountValidation)} hasError={!!errors.amount} />
+              {errors.amount && <p className="text-xs text-red-500 mt-1">{errors.amount.message}</p>}
             </div>
             <div>
               <label className="label">Vencimento *</label>
-              <input {...register('due_date', { required: true })} type="date" className="input" />
+              <input {...register('due_date', { required: 'Campo obrigatório' })} type="date" className="input" />
+              {errors.due_date && <p className="text-xs text-red-500 mt-1">{errors.due_date.message}</p>}
             </div>
             <div>
               <label className="label">Status</label>
@@ -211,8 +276,13 @@ export default function AccountsPayable() {
         </form>
       </Modal>
 
-      <ConfirmDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={confirmDelete}
-        title="Excluir registro" message={`Excluir conta de "${deleteTarget?.supplier_name}"?`} />
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={confirmDelete}
+        title="Excluir registro"
+        message={`Excluir conta de "${deleteTarget?.supplier_name}" no valor de ${deleteTarget ? formatCurrency(deleteTarget.amount) : ''}? Esta ação também removerá o lançamento de despesa vinculado.`}
+      />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Pencil, Trash2, TrendingDown } from 'lucide-react';
+import { Plus, Pencil, Trash2, TrendingDown, Link } from 'lucide-react';
 import { useForm } from 'react-hook-form';
 import { supabase } from '../lib/supabase';
 import { Expense, Category } from '../types';
@@ -8,6 +8,7 @@ import { Modal } from '../components/ui/Modal';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Spinner } from '../components/ui/Spinner';
+import { CurrencyInput, parseCurrency, amountValidation } from '../components/ui/CurrencyInput';
 import { logAudit } from '../lib/audit';
 import { useCompany } from '../contexts/CompanyContext';
 
@@ -32,7 +33,7 @@ export default function Expenses() {
   const [deleteTarget, setDeleteTarget] = useState<Expense | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const { register, handleSubmit, reset } = useForm<FormData>();
+  const { register, handleSubmit, reset, formState: { errors } } = useForm<FormData>();
 
   useEffect(() => { if (selectedCompany) { load(); loadCategories(); } }, [selectedCompany]);
 
@@ -68,20 +69,35 @@ export default function Expenses() {
   async function onSubmit(data: FormData) {
     setSaving(true);
     const payload = {
-      company_id: selectedCompany!.id,
-      description: data.description,
-      category_id: data.category_id || null,
-      amount: parseFloat(data.amount.replace(',', '.')),
-      date: data.date,
+      company_id:     selectedCompany!.id,
+      description:    data.description,
+      category_id:    data.category_id || null,
+      amount:         parseCurrency(data.amount),
+      date:           data.date,
       payment_method: data.payment_method,
-      notes: data.notes || null,
+      notes:          data.notes || null,
     };
     if (editing) {
       await supabase.from('expenses').update(payload).eq('id', editing.id);
-      await logAudit({ action: `Editou despesa: ${data.description}`, tableName: 'expenses', recordId: editing.id, companyId: selectedCompany!.id });
+      await logAudit({
+        action: `Editou despesa: ${data.description}`,
+        tableName: 'expenses',
+        recordId: editing.id,
+        companyId: selectedCompany!.id,
+        details: {
+          before: { amount: editing.amount, description: editing.description },
+          after:  { amount: payload.amount, description: data.description },
+        },
+      });
     } else {
       const { data: created } = await supabase.from('expenses').insert(payload).select().single();
-      await logAudit({ action: `Lançou despesa: ${data.description}`, tableName: 'expenses', recordId: created?.id, companyId: selectedCompany!.id });
+      await logAudit({
+        action: `Lançou despesa: ${data.description}`,
+        tableName: 'expenses',
+        recordId: created?.id,
+        companyId: selectedCompany!.id,
+        details: { amount: payload.amount },
+      });
     }
     setSaving(false);
     setModalOpen(false);
@@ -91,7 +107,13 @@ export default function Expenses() {
   async function confirmDelete() {
     if (!deleteTarget) return;
     await supabase.from('expenses').delete().eq('id', deleteTarget.id);
-    await logAudit({ action: `Excluiu despesa: ${deleteTarget.description}`, tableName: 'expenses', recordId: deleteTarget.id, companyId: selectedCompany!.id });
+    await logAudit({
+      action: `Excluiu despesa: ${deleteTarget.description} – ${formatCurrency(deleteTarget.amount)}`,
+      tableName: 'expenses',
+      recordId: deleteTarget.id,
+      companyId: selectedCompany!.id,
+      details: { amount: deleteTarget.amount },
+    });
     setDeleteTarget(null);
     load();
   }
@@ -129,7 +151,16 @@ export default function Expenses() {
               <tbody>
                 {items.map(r => (
                   <tr key={r.id} className="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
-                    <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">{r.description}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-gray-900 dark:text-gray-100">{r.description}</span>
+                        {r.ap_id && (
+                          <span title="Gerado automaticamente a partir de Conta a Pagar" className="inline-flex items-center gap-0.5 text-[10px] bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 px-1.5 py-0.5 rounded">
+                            <Link size={9} /> auto
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-gray-500 dark:text-gray-400">{r.categories?.name ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-500 dark:text-gray-400">{formatDate(r.date)}</td>
                     <td className="px-4 py-3 text-gray-500 dark:text-gray-400">{paymentMethodLabel(r.payment_method)}</td>
@@ -152,16 +183,19 @@ export default function Expenses() {
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
             <label className="label">Descrição *</label>
-            <input {...register('description', { required: true })} className="input" placeholder="Ex: Aluguel" />
+            <input {...register('description', { required: 'Campo obrigatório', maxLength: { value: 500, message: 'Máximo 500 caracteres' } })} className="input" placeholder="Ex: Aluguel" />
+            {errors.description && <p className="text-xs text-red-500 mt-1">{errors.description.message}</p>}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="label">Valor (R$) *</label>
-              <input {...register('amount', { required: true })} className="input" placeholder="0,00" />
+              <CurrencyInput {...register('amount', amountValidation)} hasError={!!errors.amount} />
+              {errors.amount && <p className="text-xs text-red-500 mt-1">{errors.amount.message}</p>}
             </div>
             <div>
               <label className="label">Data *</label>
-              <input {...register('date', { required: true })} type="date" className="input" />
+              <input {...register('date', { required: 'Campo obrigatório' })} type="date" className="input" />
+              {errors.date && <p className="text-xs text-red-500 mt-1">{errors.date.message}</p>}
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -191,7 +225,8 @@ export default function Expenses() {
       </Modal>
 
       <ConfirmDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} onConfirm={confirmDelete}
-        title="Excluir despesa" message={`Excluir "${deleteTarget?.description}"?`} />
+        title="Excluir despesa"
+        message={`Excluir "${deleteTarget?.description}" no valor de ${deleteTarget ? formatCurrency(deleteTarget.amount) : ''}?`} />
     </div>
   );
 }

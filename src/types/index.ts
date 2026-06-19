@@ -43,6 +43,7 @@ export interface Revenue {
   payment_method: PaymentMethod;
   notes: string | null;
   created_by: string | null;
+  ar_id: string | null;
   created_at: string;
   updated_at: string;
   categories?: Category;
@@ -59,6 +60,7 @@ export interface Expense {
   payment_method: PaymentMethod;
   notes: string | null;
   created_by: string | null;
+  ap_id: string | null;
   created_at: string;
   updated_at: string;
   categories?: Category;

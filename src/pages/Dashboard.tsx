@@ -68,46 +68,71 @@ export default function Dashboard() {
   }
 
   async function loadChartData(companyId: string) {
+    // Busca os 6 meses de uma vez (2 queries totais em vez de 12 sequenciais)
+    const oldest = subMonths(now, 5);
+    const { start: rangeStart } = getMonthRange(oldest.getFullYear(), oldest.getMonth() + 1);
+    const { end: rangeEnd } = getMonthRange(year, month);
+
+    const [revAll, expAll] = await Promise.all([
+      supabase.from('revenues').select('date, amount').eq('company_id', companyId)
+        .gte('date', rangeStart).lte('date', rangeEnd),
+      supabase.from('expenses').select('date, amount').eq('company_id', companyId)
+        .gte('date', rangeStart).lte('date', rangeEnd),
+    ]);
+
+    // Agrupa por mês
+    const monthMap: Record<string, { rev: number; exp: number }> = {};
+    for (const r of revAll.data ?? []) {
+      const key = r.date.substring(0, 7); // "2024-06"
+      if (!monthMap[key]) monthMap[key] = { rev: 0, exp: 0 };
+      monthMap[key]!.rev += Number(r.amount);
+    }
+    for (const e of expAll.data ?? []) {
+      const key = e.date.substring(0, 7);
+      if (!monthMap[key]) monthMap[key] = { rev: 0, exp: 0 };
+      monthMap[key]!.exp += Number(e.amount);
+    }
+
     const months: MonthData[] = [];
     for (let i = 5; i >= 0; i--) {
       const d = subMonths(now, i);
-      const y = d.getFullYear();
-      const m = d.getMonth() + 1;
-      const { start, end } = getMonthRange(y, m);
+      const key = format(d, 'yyyy-MM');
       const label = format(d, 'MMM/yy', { locale: ptBR });
-
-      const [rev, exp] = await Promise.all([
-        supabase.from('revenues').select('amount').eq('company_id', companyId).gte('date', start).lte('date', end),
-        supabase.from('expenses').select('amount').eq('company_id', companyId).gte('date', start).lte('date', end),
-      ]);
-      const r = (rev.data ?? []).reduce((a, x) => a + Number(x.amount), 0);
-      const e = (exp.data ?? []).reduce((a, x) => a + Number(x.amount), 0);
-      months.push({ month: label, receitas: r, despesas: e, saldo: r - e });
+      const { rev = 0, exp = 0 } = monthMap[key] ?? {};
+      months.push({ month: label, receitas: rev, despesas: exp, saldo: rev - exp });
     }
     setChartData(months);
   }
 
   async function loadAlerts() {
-    const alertList: ClientAlert[] = [];
     const { start: ms, end: me } = getMonthRange(year, month);
-    const { start: ps, end: pe } = getMonthRange(year, month - 1 === 0 ? 12 : month - 1);
+    const prevMonth = month - 1 === 0 ? 12 : month - 1;
+    const prevYear  = month - 1 === 0 ? year - 1 : year;
+    const { start: ps, end: pe } = getMonthRange(prevYear, prevMonth);
 
-    for (const company of companies) {
-      const [curRev, curExp, prevRev, overdueAR, overdueAP] = await Promise.all([
-        supabase.from('revenues').select('amount').eq('company_id', company.id).gte('date', ms).lte('date', me),
-        supabase.from('expenses').select('amount').eq('company_id', company.id).gte('date', ms).lte('date', me),
-        supabase.from('revenues').select('amount').eq('company_id', company.id).gte('date', ps).lte('date', pe),
-        supabase.from('accounts_receivable').select('id').eq('company_id', company.id).eq('status', 'overdue'),
-        supabase.from('accounts_payable').select('id').eq('company_id', company.id).eq('status', 'overdue'),
-      ]);
+    // C-02 N+1 fix: dispara todas as empresas em paralelo em vez de sequencial
+    const alertResults = await Promise.all(
+      companies.map(company =>
+        Promise.all([
+          supabase.from('revenues').select('amount').eq('company_id', company.id).gte('date', ms).lte('date', me),
+          supabase.from('expenses').select('amount').eq('company_id', company.id).gte('date', ms).lte('date', me),
+          supabase.from('revenues').select('amount').eq('company_id', company.id).gte('date', ps).lte('date', pe),
+          supabase.from('accounts_receivable').select('id').eq('company_id', company.id).eq('status', 'overdue'),
+          supabase.from('accounts_payable').select('id').eq('company_id', company.id).eq('status', 'overdue'),
+        ]).then(([curRev, curExp, prevRev, overdueAR, overdueAP]) => ({ company, curRev, curExp, prevRev, overdueAR, overdueAP }))
+      )
+    );
+
+    const alertList: ClientAlert[] = [];
+    for (const { company, curRev, curExp, prevRev, overdueAR, overdueAP } of alertResults) {
       const sum = (r: { amount: number }[] | null) => (r ?? []).reduce((a, x) => a + Number(x.amount), 0);
       const curR = sum(curRev.data); const curE = sum(curExp.data);
       const prevR = sum(prevRev.data);
 
       const negativeCashFlow = curR - curE < 0;
-      const overdueAccounts = (overdueAR.data?.length ?? 0) > 0 || (overdueAP.data?.length ?? 0) > 0;
-      const revenueDrop = prevR > 0 && curR < prevR * 0.7;
-      const expenseSpike = curR > 0 && curE > curR * 1.3;
+      const overdueAccounts  = (overdueAR.data?.length ?? 0) > 0 || (overdueAP.data?.length ?? 0) > 0;
+      const revenueDrop      = prevR > 0 && curR < prevR * 0.7;
+      const expenseSpike     = curR > 0 && curE > curR * 1.3;
 
       if (negativeCashFlow || overdueAccounts || revenueDrop || expenseSpike) {
         alertList.push({ company, negativeCashFlow, overdueAccounts, revenueDrop, expenseSpike });
@@ -116,16 +141,18 @@ export default function Dashboard() {
     setAlerts(alertList);
   }
 
-  const profit = stats.revenue - stats.expense;
-  const balance = stats.revenue - stats.expense;
+  const balance  = stats.revenue - stats.expense;
+  // C-03 fix: "Saldo Previsto" substituiu "Lucro do Mês" (que era idêntico ao Saldo).
+  // Saldo Previsto = saldo atual + contas pendentes a receber - contas pendentes a pagar.
+  const forecast = balance + stats.receivable - stats.payable;
 
   const cards: StatCard[] = [
-    { label: 'Saldo do Mês', value: balance, icon: DollarSign, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-900/20' },
-    { label: 'Receitas do Mês', value: stats.revenue, icon: TrendingUp, color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-900/20' },
-    { label: 'Despesas do Mês', value: stats.expense, icon: TrendingDown, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-900/20' },
-    { label: 'Lucro do Mês', value: profit, icon: BarChart2, color: profit >= 0 ? 'text-emerald-600' : 'text-red-600', bg: profit >= 0 ? 'bg-emerald-50 dark:bg-emerald-900/20' : 'bg-red-50 dark:bg-red-900/20' },
-    { label: 'A Receber', value: stats.receivable, icon: Wallet, color: 'text-violet-600', bg: 'bg-violet-50 dark:bg-violet-900/20' },
-    { label: 'A Pagar', value: stats.payable, icon: CreditCard, color: 'text-orange-600', bg: 'bg-orange-50 dark:bg-orange-900/20' },
+    { label: 'Saldo do Mês',     value: balance,          icon: DollarSign,  color: balance >= 0 ? 'text-blue-600' : 'text-red-600',       bg: balance >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-red-50 dark:bg-red-900/20' },
+    { label: 'Receitas do Mês',  value: stats.revenue,    icon: TrendingUp,  color: 'text-green-600',   bg: 'bg-green-50 dark:bg-green-900/20' },
+    { label: 'Despesas do Mês',  value: stats.expense,    icon: TrendingDown, color: 'text-red-600',    bg: 'bg-red-50 dark:bg-red-900/20' },
+    { label: 'Saldo Previsto',   value: forecast,         icon: BarChart2,   color: forecast >= 0 ? 'text-emerald-600' : 'text-red-600', bg: forecast >= 0 ? 'bg-emerald-50 dark:bg-emerald-900/20' : 'bg-red-50 dark:bg-red-900/20' },
+    { label: 'A Receber',        value: stats.receivable, icon: Wallet,      color: 'text-violet-600',  bg: 'bg-violet-50 dark:bg-violet-900/20' },
+    { label: 'A Pagar',          value: stats.payable,    icon: CreditCard,  color: 'text-orange-600',  bg: 'bg-orange-50 dark:bg-orange-900/20' },
   ];
 
   return (
@@ -139,7 +166,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* KPI Cards */}
       {loading ? (
         <div className="flex justify-center py-12"><Spinner size={32} /></div>
       ) : (
@@ -156,7 +182,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="card p-6">
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">Receitas x Despesas (6 meses)</h3>
@@ -187,7 +212,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Consolidated Alerts Panel (admin only) */}
       {isAdmin && (
         <div className="card p-6">
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4 flex items-center gap-2">
@@ -201,9 +225,7 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="space-y-3">
-              {alerts.map(a => (
-                <AlertRow key={a.company.id} alert={a} />
-              ))}
+              {alerts.map(a => <AlertRow key={a.company.id} alert={a} />)}
             </div>
           )}
         </div>
@@ -214,10 +236,10 @@ export default function Dashboard() {
 
 function AlertRow({ alert }: { alert: ClientAlert }) {
   const tags = [
-    alert.negativeCashFlow && { label: 'Fluxo negativo', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
-    alert.overdueAccounts && { label: 'Contas vencidas', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400' },
-    alert.revenueDrop && { label: 'Queda de faturamento', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' },
-    alert.expenseSpike && { label: 'Despesas excessivas', color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
+    alert.negativeCashFlow && { label: 'Fluxo negativo',        color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
+    alert.overdueAccounts  && { label: 'Contas vencidas',        color: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400' },
+    alert.revenueDrop      && { label: 'Queda de faturamento',   color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' },
+    alert.expenseSpike     && { label: 'Despesas excessivas',    color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
   ].filter(Boolean) as { label: string; color: string }[];
 
   return (
